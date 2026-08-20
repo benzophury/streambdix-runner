@@ -145,7 +145,7 @@ else
     done
 fi
 
-# 6. Start Cloudflare Tunnel pointing to 127.0.0.1:7001 (IPv4 explicit for Termux)
+# 6. Start Cloudflare Tunnel pointing to 127.0.0.1:7001
 echo -e "${BLUE}🌐 Starting Cloudflare Tunnel...${NC}"
 LOG_FILE="$(mktemp)"
 "$CLOUDFLARED_BIN" tunnel --url "http://127.0.0.1:$PORT" > "$LOG_FILE" 2>&1 &
@@ -154,7 +154,11 @@ TUNNEL_PID=$!
 echo -e "${YELLOW}⏳ Generating public tunnel URL...${NC}"
 TUNNEL_URL=""
 for i in {1..25}; do
-    TUNNEL_URL=$(grep -oE 'https://[a-zA-Z0-9.-]+\.trycloudflare\.com' "$LOG_FILE" | tr -d '\r' | head -n 1)
+    # Target the exact banner line after "Your quick Tunnel has been created" and filter out api.* subdomains
+    TUNNEL_URL=$(grep -A 2 "Your quick Tunnel has been created" "$LOG_FILE" 2>/dev/null | grep -oE 'https://[a-zA-Z0-9.-]+\.trycloudflare\.com' | grep -v 'api\.' | tr -d '\r' | head -n 1)
+    if [ -z "$TUNNEL_URL" ]; then
+        TUNNEL_URL=$(grep -oE 'https://[a-zA-Z0-9-]+\.trycloudflare\.com' "$LOG_FILE" 2>/dev/null | grep -v 'api\.' | tr -d '\r' | head -n 1)
+    fi
     if [ -n "$TUNNEL_URL" ]; then
         break
     fi
@@ -164,7 +168,7 @@ done
 rm -f "$LOG_FILE"
 
 if [ -n "$TUNNEL_URL" ]; then
-    # Strip any trailing slashes or whitespace
+    # Strip trailing slashes
     TUNNEL_URL="$(echo "$TUNNEL_URL" | sed 's/\/*$//')"
     
     echo -e "\n${CYAN}=====================================================${NC}"
