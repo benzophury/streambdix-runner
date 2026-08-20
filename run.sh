@@ -43,7 +43,6 @@ if [ -z "$TMPDIR" ]; then
 fi
 mkdir -p "$TMPDIR"
 
-
 case "$ARCH" in
     x86_64|amd64)
         CF_ARCH="amd64"
@@ -122,6 +121,57 @@ fi
 CLOUDFLARED_BIN="$(command -v cloudflared || echo "$BIN_DIR/cloudflared")"
 echo -e "${GREEN}✓ cloudflared detected at $CLOUDFLARED_BIN${NC}"
 
+# 4. Termux Specific DNS & TLS Preparation (proot + ca-certificates)
+if [ "$OS_TYPE" = "termux" ]; then
+    echo -e "${BLUE}🔧 Setting up Termux network environment (DNS + SSL certificates)...${NC}"
+    
+    # Ensure proot is installed
+    if ! command_exists proot; then
+        echo -e "${YELLOW}📦 Installing proot for Termux network compatibility...${NC}"
+        pkg install proot -y 2>/dev/null || true
+    fi
+    
+    # Find CA Cert Bundle
+    CERT_FILE=""
+    for path in \
+        "$PREFIX/etc/tls/cert.pem" \
+        "$PREFIX/etc/ssl/certs/ca-certificates.crt" \
+        "$PREFIX/etc/ca-certificates/extracted/tls-ca-bundle.pem" \
+        "$PREFIX/share/ca-certificates/mozilla/cacert.pem"; do
+        if [ -f "$path" ]; then
+            CERT_FILE="$path"
+            break
+        fi
+    done
+    
+    if [ -z "$CERT_FILE" ]; then
+        echo -e "${YELLOW}📦 Installing ca-certificates...${NC}"
+        pkg install ca-certificates -y 2>/dev/null || true
+        for path in \
+            "$PREFIX/etc/tls/cert.pem" \
+            "$PREFIX/etc/ssl/certs/ca-certificates.crt" \
+            "$PREFIX/etc/ca-certificates/extracted/tls-ca-bundle.pem" \
+            "$PREFIX/share/ca-certificates/mozilla/cacert.pem"; do
+            if [ -f "$path" ]; then
+                CERT_FILE="$path"
+                break
+            fi
+        done
+    fi
+    
+    if [ -n "$CERT_FILE" ]; then
+        export SSL_CERT_FILE="$CERT_FILE"
+    fi
+    
+    # Create resolv.conf with Cloudflare DNS
+    RESOLV_FILE="$TMPDIR/resolv.conf"
+    cat > "$RESOLV_FILE" <<EOF
+nameserver 1.1.1.1
+nameserver 8.8.8.8
+nameserver 8.8.4.4
+EOF
+fi
+
 # Cleanup handler on Ctrl+C / Exit
 cleanup() {
     echo -e "\n${YELLOW}🛑 Shutting down processes...${NC}"
@@ -131,6 +181,7 @@ cleanup() {
     if [ -n "$TUNNEL_PID" ]; then
         kill "$TUNNEL_PID" 2>/dev/null || true
     fi
+    [ -n "$RESOLV_FILE" ] && [ -f "$RESOLV_FILE" ] && rm -f "$RESOLV_FILE" 2>/dev/null || true
     echo -e "${GREEN}✓ Cleanup complete. Goodbye!${NC}"
     exit 0
 }
@@ -147,7 +198,7 @@ is_port_open() {
     fi
 }
 
-# 4. OS-Specific Process Management for StreamBDIX
+# 5. Process Management for StreamBDIX
 PORT=7001
 if is_port_open; then
     echo -e "${GREEN}✓ StreamBDIX server is already running on 127.0.0.1:$PORT.${NC}"
@@ -169,18 +220,26 @@ else
     done
 fi
 
-# 5. OS-Catered Cloudflare Tunnel Execution & Log Parsing
+# 6. Cloudflare Tunnel Execution & Log Parsing
 echo -e "${BLUE}🌐 Starting Cloudflare Tunnel ($OS_TYPE mode)...${NC}"
 LOG_FILE="$(mktemp)"
 
 if [ "$OS_TYPE" = "termux" ]; then
-    # Termux Mode: Use native --logfile flag to prevent Android bionic stream buffering
-    "$CLOUDFLARED_BIN" tunnel --url "http://127.0.0.1:$PORT" --logfile "$LOG_FILE" >/dev/null 2>&1 &
+    PROOT_BIN="$(command -v proot || echo "")"
+    if [ -n "$PROOT_BIN" ] && [ -f "$RESOLV_FILE" ]; then
+        PROOT_ARGS=("-b" "$RESOLV_FILE:/etc/resolv.conf")
+        if [ -n "$CERT_FILE" ]; then
+            PROOT_ARGS+=("-b" "$CERT_FILE:/etc/ssl/certs/ca-certificates.crt")
+        fi
+        "$PROOT_BIN" "${PROOT_ARGS[@]}" "$CLOUDFLARED_BIN" tunnel --url "http://127.0.0.1:$PORT" 2> "$LOG_FILE" &
+    else
+        "$CLOUDFLARED_BIN" tunnel --url "http://127.0.0.1:$PORT" 2> "$LOG_FILE" &
+    fi
     TUNNEL_PID=$!
     MAX_LOOPS=35
 else
-    # Linux / macOS Mode: Standard execution with logfile
-    "$CLOUDFLARED_BIN" tunnel --url "http://127.0.0.1:$PORT" --logfile "$LOG_FILE" >/dev/null 2>&1 &
+    # Linux / macOS Mode: Standard stderr redirection
+    "$CLOUDFLARED_BIN" tunnel --url "http://127.0.0.1:$PORT" 2> "$LOG_FILE" &
     TUNNEL_PID=$!
     MAX_LOOPS=25
 fi
@@ -188,8 +247,7 @@ fi
 echo -e "${YELLOW}⏳ Generating public tunnel URL...${NC}"
 TUNNEL_URL=""
 for i in $(seq 1 $MAX_LOOPS); do
-    # Extract trycloudflare URL while strictly excluding api.trycloudflare.com
-    TUNNEL_URL=$(grep -i "trycloudflare.com" "$LOG_FILE" 2>/dev/null | grep -v "api\.trycloudflare\.com" | grep -oE 'https://[^[:space:]|\"]+\.trycloudflare\.com' | tr -d '\r' | head -n 1)
+    TUNNEL_URL=$(grep -oE 'https://[a-zA-Z0-9]+(-[a-zA-Z0-9]+)+\.trycloudflare\.com' "$LOG_FILE" 2>/dev/null | head -n 1)
     if [ -n "$TUNNEL_URL" ]; then
         break
     fi
