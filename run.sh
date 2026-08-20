@@ -25,6 +25,10 @@ if [ -n "$PREFIX" ] && [ -d "$PREFIX" ] && [[ "$PREFIX" == *"com.termux"* ]]; th
     IS_TERMUX=true
     OS_TYPE="termux"
     echo -e "${BLUE}📱 System Detected: Android (Termux)${NC}"
+    # Set TMPDIR safely for Termux to avoid permission denied on /tmp
+    if [ -d "$PREFIX/tmp" ]; then
+        export TMPDIR="$PREFIX/tmp"
+    fi
 elif [ "$SYSTEM_NAME" = "darwin" ]; then
     OS_TYPE="macos"
     echo -e "${BLUE}🍏 System Detected: macOS${NC}"
@@ -32,6 +36,13 @@ else
     OS_TYPE="linux"
     echo -e "${BLUE}🐧 System Detected: Standard Linux ($SYSTEM_NAME)${NC}"
 fi
+
+# Ensure TMPDIR is set and exists
+if [ -z "$TMPDIR" ]; then
+    export TMPDIR="/tmp"
+fi
+mkdir -p "$TMPDIR"
+
 
 case "$ARCH" in
     x86_64|amd64)
