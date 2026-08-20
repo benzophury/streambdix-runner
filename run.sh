@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # StreamBDIX & Cloudflare Tunnel Universal Launcher
-# Compatible with Linux, Termux (Android), macOS, etc.
+# OS-Catered process management for Linux, Termux (Android), macOS, etc.
 
 set -e
 
@@ -16,18 +16,22 @@ echo -e "${CYAN}=====================================================${NC}"
 echo -e "${CYAN}  🚀 StreamBDIX + Cloudflare Tunnel Auto-Launcher  ${NC}"
 echo -e "${CYAN}=====================================================${NC}"
 
-# 1. Detect Termux / Linux Environment
+# 1. OS & Environment Detection
 IS_TERMUX=false
+SYSTEM_NAME="$(uname -s | tr '[:upper:]' '[:lower:]')"
+ARCH="$(uname -m)"
+
 if [ -n "$PREFIX" ] && [ -d "$PREFIX" ] && [[ "$PREFIX" == *"com.termux"* ]]; then
     IS_TERMUX=true
-    echo -e "${BLUE}ℹ️ Environment: Termux (Android)${NC}"
+    OS_TYPE="termux"
+    echo -e "${BLUE}📱 System Detected: Android (Termux)${NC}"
+elif [ "$SYSTEM_NAME" = "darwin" ]; then
+    OS_TYPE="macos"
+    echo -e "${BLUE}🍏 System Detected: macOS${NC}"
 else
-    echo -e "${BLUE}ℹ️ Environment: Standard Linux / Unix System${NC}"
+    OS_TYPE="linux"
+    echo -e "${BLUE}🐧 System Detected: Standard Linux ($SYSTEM_NAME)${NC}"
 fi
-
-# 2. Detect OS & Architecture
-OS="$(uname -s | tr '[:upper:]' '[:lower:]')"
-ARCH="$(uname -m)"
 
 case "$ARCH" in
     x86_64|amd64)
@@ -52,11 +56,18 @@ command_exists() {
     command -v "$1" >/dev/null 2>&1
 }
 
-# 3. Check for Node.js & npx
+# 2. Dependency Resolution per System Type
 if ! command_exists node || ! command_exists npx; then
     echo -e "${YELLOW}⚠️ Node.js / npx not found. Attempting installation...${NC}"
-    if [ "$IS_TERMUX" = true ]; then
+    if [ "$OS_TYPE" = "termux" ]; then
         pkg update && pkg install nodejs -y
+    elif [ "$OS_TYPE" = "macos" ]; then
+        if command_exists brew; then
+            brew install node
+        else
+            echo -e "${RED}Please install Node.js: brew install node${NC}"
+            exit 1
+        fi
     elif command_exists apt-get; then
         echo -e "${RED}Please install Node.js: sudo apt install nodejs npm -y${NC}"
         exit 1
@@ -73,8 +84,8 @@ if ! command_exists node || ! command_exists npx; then
 fi
 echo -e "${GREEN}✓ Node.js $(node -v) & npx detected${NC}"
 
-# Determine installation directory for binaries
-if [ "$IS_TERMUX" = true ]; then
+# Binary installation directory per OS
+if [ "$OS_TYPE" = "termux" ]; then
     BIN_DIR="$PREFIX/bin"
 else
     BIN_DIR="$HOME/.local/bin"
@@ -82,10 +93,10 @@ else
     export PATH="$BIN_DIR:$PATH"
 fi
 
-# 4. Ensure cloudflared is installed
+# 3. Cloudflare Binary Resolution
 if ! command_exists cloudflared && [ ! -f "$BIN_DIR/cloudflared" ]; then
-    echo -e "${YELLOW}⚠️ cloudflared not found. Downloading for $OS-$CF_ARCH...${NC}"
-    CF_URL="https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-${OS}-${CF_ARCH}"
+    echo -e "${YELLOW}⚠️ cloudflared not found. Downloading for $SYSTEM_NAME-$CF_ARCH...${NC}"
+    CF_URL="https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-${SYSTEM_NAME}-${CF_ARCH}"
     
     if command_exists curl; then
         curl -sSL "$CF_URL" -o "$BIN_DIR/cloudflared"
@@ -114,7 +125,7 @@ cleanup() {
 }
 trap cleanup SIGINT SIGTERM EXIT
 
-# Function to check if port 7001 is listening
+# Port check routine
 is_port_open() {
     if command_exists curl; then
         curl -s http://127.0.0.1:7001 >/dev/null 2>&1
@@ -125,7 +136,7 @@ is_port_open() {
     fi
 }
 
-# 5. Start StreamBDIX if not already running
+# 4. OS-Specific Process Management for StreamBDIX
 PORT=7001
 if is_port_open; then
     echo -e "${GREEN}✓ StreamBDIX server is already running on 127.0.0.1:$PORT.${NC}"
@@ -134,9 +145,11 @@ else
     npx -y streambdix >/dev/null 2>&1 &
     STREAMBDIX_PID=$!
     
-    # Wait for StreamBDIX to respond on port 7001 (up to 15s)
     echo -e "${YELLOW}⏳ Waiting for StreamBDIX to initialize...${NC}"
-    for i in {1..15}; do
+    INIT_TIMEOUT=15
+    [ "$OS_TYPE" = "termux" ] && INIT_TIMEOUT=20
+    
+    for i in $(seq 1 $INIT_TIMEOUT); do
         if is_port_open; then
             echo -e "${GREEN}✓ StreamBDIX started successfully!${NC}"
             break
@@ -145,18 +158,27 @@ else
     done
 fi
 
-# 6. Start Cloudflare Tunnel pointing to 127.0.0.1:7001
-echo -e "${BLUE}🌐 Starting Cloudflare Tunnel...${NC}"
+# 5. OS-Catered Cloudflare Tunnel Execution & Log Parsing
+echo -e "${BLUE}🌐 Starting Cloudflare Tunnel ($OS_TYPE mode)...${NC}"
 LOG_FILE="$(mktemp)"
-"$CLOUDFLARED_BIN" tunnel --url "http://127.0.0.1:$PORT" > "$LOG_FILE" 2>&1 &
-TUNNEL_PID=$!
+
+if [ "$OS_TYPE" = "termux" ]; then
+    # Termux Mode: Use native --logfile flag to prevent Android bionic stream buffering
+    "$CLOUDFLARED_BIN" tunnel --url "http://127.0.0.1:$PORT" --logfile "$LOG_FILE" >/dev/null 2>&1 &
+    TUNNEL_PID=$!
+    MAX_LOOPS=35
+else
+    # Linux / macOS Mode: Standard execution with logfile
+    "$CLOUDFLARED_BIN" tunnel --url "http://127.0.0.1:$PORT" --logfile "$LOG_FILE" >/dev/null 2>&1 &
+    TUNNEL_PID=$!
+    MAX_LOOPS=25
+fi
 
 echo -e "${YELLOW}⏳ Generating public tunnel URL...${NC}"
 TUNNEL_URL=""
-for i in {1..25}; do
-    # Hyphenated regex specifically matches Cloudflare quick tunnel subdomains (e.g. word-word-word.trycloudflare.com)
-    # and strictly excludes non-hyphenated system domains like api.trycloudflare.com
-    TUNNEL_URL=$(grep -oE 'https://[a-zA-Z0-9]+(-[a-zA-Z0-9]+)+\.trycloudflare\.com' "$LOG_FILE" 2>/dev/null | tr -d '\r' | head -n 1)
+for i in $(seq 1 $MAX_LOOPS); do
+    # Extract trycloudflare URL while strictly excluding api.trycloudflare.com
+    TUNNEL_URL=$(grep -i "trycloudflare.com" "$LOG_FILE" 2>/dev/null | grep -v "api\.trycloudflare\.com" | grep -oE 'https://[^[:space:]|\"]+\.trycloudflare\.com' | tr -d '\r' | head -n 1)
     if [ -n "$TUNNEL_URL" ]; then
         break
     fi
@@ -166,7 +188,6 @@ done
 rm -f "$LOG_FILE"
 
 if [ -n "$TUNNEL_URL" ]; then
-    # Strip trailing slashes
     TUNNEL_URL="$(echo "$TUNNEL_URL" | sed 's/\/*$//')"
     
     echo -e "\n${CYAN}=====================================================${NC}"
