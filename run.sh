@@ -154,11 +154,9 @@ TUNNEL_PID=$!
 echo -e "${YELLOW}⏳ Generating public tunnel URL...${NC}"
 TUNNEL_URL=""
 for i in {1..25}; do
-    # Target the exact banner line after "Your quick Tunnel has been created" and filter out api.* subdomains
-    TUNNEL_URL=$(grep -A 2 "Your quick Tunnel has been created" "$LOG_FILE" 2>/dev/null | grep -oE 'https://[a-zA-Z0-9.-]+\.trycloudflare\.com' | grep -v 'api\.' | tr -d '\r' | head -n 1)
-    if [ -z "$TUNNEL_URL" ]; then
-        TUNNEL_URL=$(grep -oE 'https://[a-zA-Z0-9-]+\.trycloudflare\.com' "$LOG_FILE" 2>/dev/null | grep -v 'api\.' | tr -d '\r' | head -n 1)
-    fi
+    # Hyphenated regex specifically matches Cloudflare quick tunnel subdomains (e.g. word-word-word.trycloudflare.com)
+    # and strictly excludes non-hyphenated system domains like api.trycloudflare.com
+    TUNNEL_URL=$(grep -oE 'https://[a-zA-Z0-9]+(-[a-zA-Z0-9]+)+\.trycloudflare\.com' "$LOG_FILE" 2>/dev/null | tr -d '\r' | head -n 1)
     if [ -n "$TUNNEL_URL" ]; then
         break
     fi
