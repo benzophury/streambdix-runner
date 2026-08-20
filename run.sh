@@ -114,27 +114,47 @@ cleanup() {
 }
 trap cleanup SIGINT SIGTERM EXIT
 
+# Function to check if port 7001 is listening
+is_port_open() {
+    if command_exists curl; then
+        curl -s http://127.0.0.1:7001 >/dev/null 2>&1
+    elif command_exists lsof; then
+        lsof -i :7001 >/dev/null 2>&1
+    else
+        (exec 3<>/dev/tcp/127.0.0.1/7001) 2>/dev/null
+    fi
+}
+
 # 5. Start StreamBDIX if not already running
 PORT=7001
-if command_exists lsof && lsof -i :$PORT >/dev/null 2>&1 || (command_exists nc && nc -z 127.0.0.1 $PORT >/dev/null 2>&1); then
-    echo -e "${GREEN}✓ StreamBDIX server is already running on port $PORT.${NC}"
+if is_port_open; then
+    echo -e "${GREEN}✓ StreamBDIX server is already running on 127.0.0.1:$PORT.${NC}"
 else
-    echo -e "${BLUE}⚡ Starting StreamBDIX on port $PORT...${NC}"
+    echo -e "${BLUE}⚡ Starting StreamBDIX on 127.0.0.1:$PORT...${NC}"
     npx -y streambdix >/dev/null 2>&1 &
     STREAMBDIX_PID=$!
-    sleep 3
+    
+    # Wait for StreamBDIX to respond on port 7001 (up to 15s)
+    echo -e "${YELLOW}⏳ Waiting for StreamBDIX to initialize...${NC}"
+    for i in {1..15}; do
+        if is_port_open; then
+            echo -e "${GREEN}✓ StreamBDIX started successfully!${NC}"
+            break
+        fi
+        sleep 1
+    done
 fi
 
-# 6. Start Cloudflare Tunnel
+# 6. Start Cloudflare Tunnel pointing to 127.0.0.1:7001 (IPv4 explicit for Termux)
 echo -e "${BLUE}🌐 Starting Cloudflare Tunnel...${NC}"
 LOG_FILE="$(mktemp)"
-"$CLOUDFLARED_BIN" tunnel --url "http://localhost:$PORT" > "$LOG_FILE" 2>&1 &
+"$CLOUDFLARED_BIN" tunnel --url "http://127.0.0.1:$PORT" > "$LOG_FILE" 2>&1 &
 TUNNEL_PID=$!
 
 echo -e "${YELLOW}⏳ Generating public tunnel URL...${NC}"
 TUNNEL_URL=""
-for i in {1..20}; do
-    TUNNEL_URL=$(grep -oE 'https://[a-zA-Z0-9-]+\.trycloudflare\.com' "$LOG_FILE" | head -n 1)
+for i in {1..25}; do
+    TUNNEL_URL=$(grep -oE 'https://[a-zA-Z0-9.-]+\.trycloudflare\.com' "$LOG_FILE" | tr -d '\r' | head -n 1)
     if [ -n "$TUNNEL_URL" ]; then
         break
     fi
@@ -144,6 +164,9 @@ done
 rm -f "$LOG_FILE"
 
 if [ -n "$TUNNEL_URL" ]; then
+    # Strip any trailing slashes or whitespace
+    TUNNEL_URL="$(echo "$TUNNEL_URL" | sed 's/\/*$//')"
+    
     echo -e "\n${CYAN}=====================================================${NC}"
     echo -e "${GREEN}🎉 SUCCESS! StreamBDIX Tunnel is Live!${NC}"
     echo -e "${CYAN}=====================================================${NC}"
